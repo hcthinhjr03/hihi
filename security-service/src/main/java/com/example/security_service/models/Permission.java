@@ -3,11 +3,15 @@ package com.example.security_service.models;
 import java.util.HashSet;
 import java.util.Set;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 import lombok.NoArgsConstructor;
+import lombok.ToString;
 
 @Entity
 @Table(name = "permissions")
@@ -37,6 +41,9 @@ public class Permission {
         GET, POST, PUT, DELETE, PATCH
     }
 
-    @ManyToMany(mappedBy = "permissions")
+    @ManyToMany(mappedBy = "permissions", fetch = FetchType.LAZY)
+    @JsonIgnore 
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude 
     private Set<Role> roles = new HashSet<>();
 }

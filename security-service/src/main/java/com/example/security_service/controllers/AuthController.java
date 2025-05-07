@@ -1,25 +1,21 @@
 package com.example.security_service.controllers;
 
-import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Map;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.util.stream.Collectors;
-
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.Query;
+import jakarta.transaction.Transactional;
 import jakarta.validation.Valid;
-
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
-import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -31,16 +27,13 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-
 import com.example.security_service.dto.JwtResponse;
 import com.example.security_service.dto.LoginRequest;
 import com.example.security_service.dto.MessageResponse;
 import com.example.security_service.dto.SignupRequest;
 import com.example.security_service.models.ERole;
-import com.example.security_service.models.Permission;
 import com.example.security_service.models.Role;
 import com.example.security_service.models.User;
-import com.example.security_service.repositories.PermissionRepository;
 import com.example.security_service.repositories.RoleRepository;
 import com.example.security_service.repositories.UserRepository;
 import com.example.security_service.security.jwt.JwtUtils;
@@ -62,7 +55,7 @@ public class AuthController {
     RoleRepository roleRepository;
 
     @Autowired
-    private PermissionRepository permissionRepository;
+    private EntityManager entityManager;
 
     @Autowired
     PasswordEncoder encoder;
@@ -99,9 +92,7 @@ public class AuthController {
             @RequestParam String path,
             @RequestParam String method) {
         try {
-            // Decode URL path
             String decodedPath = URLDecoder.decode(path, StandardCharsets.UTF_8.name()).trim();
-
             logger.debug("Checking permission - Role: {}, Path: {}, Method: {}",
                     role, decodedPath, method);
 
@@ -110,84 +101,115 @@ public class AuthController {
                 return true;
             }
 
-            // Lấy tất cả permission của role
-            List<Permission> permissions = permissionRepository.findByRoleName(role);
+            @SuppressWarnings("unchecked")
+            List<Object[]> results = entityManager.createNativeQuery(
+                    "SELECT p.name, p.path, p.method " +
+                            "FROM permissions p " +
+                            "JOIN role_permissions rp ON p.id = rp.permission_id " +
+                            "JOIN roles r ON rp.role_id = r.id " +
+                            "WHERE r.name = :roleName")
+                    .setParameter("roleName", role)
+                    .getResultList();
 
-            logger.debug("Found {} permissions for role {}", permissions.size(), role);
+            logger.debug("Found {} permissions for role {}", results.size(), role);
 
-            // Kiểm tra từng permission xem có khớp với path và method không
+            // Kiểm tra quyền thủ công
             AntPathMatcher pathMatcher = new AntPathMatcher();
-            boolean hasPermission = permissions.stream()
-                    .anyMatch(permission -> {
-                        boolean methodMatch = method.equalsIgnoreCase(permission.getMethod().name());
-                        boolean pathMatch = pathMatcher.match(permission.getPath(), decodedPath);
+            for (Object[] result : results) {
+                String permName = (String) result[0];
+                String permPath = (String) result[1];
+                String permMethod = (String) result[2];
 
-                        logger.debug(
-                                "Permission check - Name: {}, Path: {}, Method: {}, MethodMatch: {}, PathMatch: {}",
-                                permission.getName(), permission.getPath(), permission.getMethod(), methodMatch,
-                                pathMatch);
+                boolean methodMatch = method.equalsIgnoreCase(permMethod);
+                boolean pathMatch = pathMatcher.match(permPath, decodedPath);
 
-                        return methodMatch && pathMatch;
-                    });
+                logger.debug("Permission check - Name: {}, Path: {}, Method: {}, MethodMatch: {}, PathMatch: {}",
+                        permName, permPath, permMethod, methodMatch, pathMatch);
 
-            logger.debug("Permission check result: {}", hasPermission);
-            return hasPermission;
+                if (methodMatch && pathMatch) {
+                    return true;
+                }
+            }
 
-        } catch (UnsupportedEncodingException e) {
-            logger.error("Error decoding path: {}", e.getMessage());
+            return false;
+        } catch (Exception e) {
+            logger.error("Error checking permission: {}", e.getMessage());
+            e.printStackTrace();
             return false;
         }
     }
 
+    @Transactional
     @PostMapping("/register")
     public ResponseEntity<?> registerUser(@Valid @RequestBody SignupRequest signUpRequest) {
-        if (userRepository.existsByUsername(signUpRequest.getUsername())) {
-            return ResponseEntity
-                    .badRequest()
-                    .body(new MessageResponse("Error: Username is already taken!"));
-        }
-
-        if (userRepository.existsByEmail(signUpRequest.getEmail())) {
-            return ResponseEntity
-                    .badRequest()
-                    .body(new MessageResponse("Error: Email is already in use!"));
-        }
-
-        // Create new user account
-        User user = new User();
-        user.setUsername(signUpRequest.getUsername());
-        user.setEmail(signUpRequest.getEmail());
-        user.setPassword(encoder.encode(signUpRequest.getPassword()));
-        user.setFirstName(signUpRequest.getFirstName());
-        user.setLastName(signUpRequest.getLastName());
-        user.setActive(true);
-
-        // Assign role to user
-        String strRole = signUpRequest.getRole();
-        Role role;
-
-        if (strRole == null) {
-            role = roleRepository.findByName(ERole.ROLE_CUSTOMER)
-                    .orElseThrow(() -> new RuntimeException("Error: Default role is not found."));
-        } else {
-            switch (strRole) {
-                case "admin":
-                    role = roleRepository.findByName(ERole.ROLE_ADMIN)
-                            .orElseThrow(() -> new RuntimeException("Error: Admin role is not found."));
-                    break;
-                case "technician":
-                    role = roleRepository.findByName(ERole.ROLE_TECHNICIAN)
-                            .orElseThrow(() -> new RuntimeException("Error: Technician role is not found."));
-                    break;
-                default:
-                    role = roleRepository.findByName(ERole.ROLE_CUSTOMER)
-                            .orElseThrow(() -> new RuntimeException("Error: Customer role is not found."));
+        try {
+            if (userRepository.existsByUsername(signUpRequest.getUsername())) {
+                return ResponseEntity
+                        .badRequest()
+                        .body(new MessageResponse("Error: Username đã tồn tại!"));
             }
+
+            if (userRepository.existsByEmail(signUpRequest.getEmail())) {
+                return ResponseEntity
+                        .badRequest()
+                        .body(new MessageResponse("Error: Email đã được sử dụng!"));
+            }
+
+            // Create new user account
+            User user = new User();
+            user.setUsername(signUpRequest.getUsername());
+            user.setEmail(signUpRequest.getEmail());
+            user.setPassword(encoder.encode(signUpRequest.getPassword()));
+            user.setFirstName(signUpRequest.getFirstName());
+            user.setLastName(signUpRequest.getLastName());
+            user.setActive(true);
+
+            // Xác định role name dựa trên input
+            String strRole = signUpRequest.getRole();
+            ERole roleName = ERole.ROLE_CUSTOMER; // Default role
+
+            if (strRole != null) {
+                switch (strRole.toLowerCase()) {
+                    case "admin":
+                        roleName = ERole.ROLE_ADMIN;
+                        break;
+                    case "technician":
+                        roleName = ERole.ROLE_TECHNICIAN;
+                        break;
+                }
+            }
+
+            // Truy vấn role trực tiếp từ database
+            Query query = entityManager.createQuery("SELECT r FROM Role r WHERE r.name = :name");
+            query.setParameter("name", roleName);
+
+            Role role;
+            try {
+                role = (Role) query.getSingleResult();
+            } catch (Exception e) {
+                return ResponseEntity
+                        .status(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body(new MessageResponse("Error: Không tìm thấy role " + roleName));
+            }
+
+            // Tách và xử lý role từ db
+            Role detachedRole = new Role();
+            detachedRole.setId(role.getId());
+            detachedRole.setName(role.getName());
+            detachedRole.setDescription(role.getDescription());
+
+            // Gán role cho user
+            user.setRole(detachedRole);
+
+            // Lưu user
+            userRepository.save(user);
+
+            return ResponseEntity.ok(new MessageResponse("Đăng ký người dùng thành công!"));
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity
+                    .status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(new MessageResponse("Error: " + e.getMessage()));
         }
-
-        user.setRole(role);
-        userRepository.save(user);
-
-        return ResponseEntity.ok(new MessageResponse("User registered successfully!"));
     }
 }

@@ -44,7 +44,8 @@ public class UserDetailsImpl implements UserDetails {
     public static UserDetailsImpl build(User user) {
         List<GrantedAuthority> authorities = new ArrayList<>();
         
-        // Add role as an authority
+        // Add role as an authority if exists
+    if (user.getRole() != null) {
         authorities.add(new SimpleGrantedAuthority(user.getRole().getName().name()));
         
         // Add permissions as authorities
@@ -54,6 +55,7 @@ public class UserDetailsImpl implements UserDetails {
                     .map(permission -> new SimpleGrantedAuthority(permission.getName()))
                     .collect(Collectors.toList()));
         }
+    }
 
         return new UserDetailsImpl(
                 user.getId(),

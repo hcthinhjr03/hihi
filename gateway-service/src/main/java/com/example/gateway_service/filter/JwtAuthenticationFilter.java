@@ -1,8 +1,6 @@
 package com.example.gateway_service.filter;
 
 import com.example.gateway_service.security.JwtUtils;
-import com.github.benmanes.caffeine.cache.Caffeine;
-import com.github.benmanes.caffeine.cache.LoadingCache;
 
 import io.jsonwebtoken.Claims;
 import org.slf4j.Logger;
@@ -16,12 +14,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.util.UriUtils;
-
 import reactor.core.publisher.Mono;
-
 import java.nio.charset.StandardCharsets;
-import java.util.Objects;
-import java.util.concurrent.TimeUnit;
 
 @Component
 public class JwtAuthenticationFilter extends AbstractGatewayFilterFactory<JwtAuthenticationFilter.Config> {
@@ -30,19 +24,12 @@ public class JwtAuthenticationFilter extends AbstractGatewayFilterFactory<JwtAut
     private final JwtUtils jwtUtils;
     private final WebClient.Builder webClientBuilder;
 
-    // Cache để cải thiện hiệu suất
-    private final LoadingCache<CacheKey, Boolean> permissionCache;
 
     public JwtAuthenticationFilter(JwtUtils jwtUtils, WebClient.Builder webClientBuilder) {
         super(Config.class);
         this.jwtUtils = jwtUtils;
         this.webClientBuilder = webClientBuilder;
 
-        // Khởi tạo cache với thời gian hết hạn là 5 phút
-        permissionCache = Caffeine.newBuilder()
-                .expireAfterWrite(5, TimeUnit.MINUTES)
-                .maximumSize(10000)
-                .build(this::checkPermissionFromSecurityService);
     }
 
     @Override
@@ -52,7 +39,7 @@ public class JwtAuthenticationFilter extends AbstractGatewayFilterFactory<JwtAut
             String requestPath = request.getPath().value();
             String requestMethod = request.getMethod().name();
 
-            //Skip authentication for auth endpoints
+            // Skip authentication for auth endpoints
             if (request.getURI().getPath().startsWith("/api/auth/")) {
                 return chain.filter(exchange);
             }
@@ -79,10 +66,10 @@ public class JwtAuthenticationFilter extends AbstractGatewayFilterFactory<JwtAut
 
             // Extract user info from token
             String userId = getUserIdFromToken(token);
-            String role = getRoleFromToken(token); // Lấy role thay vì roleId
+            String role = getRoleFromToken(token);
 
             if ("ROLE_ADMIN".equals(role)) {
-                // Cho qua luôn
+                // Admin có tất cả quyền
                 ServerHttpRequest modifiedRequest = exchange.getRequest().mutate()
                         .header("X-User-Id", userId)
                         .header("X-User-Role", role)
@@ -93,47 +80,35 @@ public class JwtAuthenticationFilter extends AbstractGatewayFilterFactory<JwtAut
             logger.debug("User ID: {}, Role: {}, Accessing path: {}, Method: {}",
                     userId, role, requestPath, requestMethod);
 
-            // Kiểm tra quyền từ cache hoặc database
-            CacheKey cacheKey = new CacheKey(role, requestPath, requestMethod);
-            try {
-                boolean hasPermission = permissionCache.get(cacheKey);
-                if (!hasPermission) {
-                    logger.warn("Access denied for user {} with role {} to path {} method {}",
-                            userId, role, requestPath, requestMethod);
-                    return onError(exchange, "Access denied. Insufficient permissions.", HttpStatus.FORBIDDEN);
-                }
-            } catch (Exception e) {
-                logger.error("Error checking permissions: {}", e.getMessage());
-                return onError(exchange, "Error checking permissions", HttpStatus.INTERNAL_SERVER_ERROR);
-            }
-
-            // Add user info to headers for downstream services
-            ServerHttpRequest modifiedRequest = exchange.getRequest().mutate()
-                    .header("X-User-Id", userId)
-                    .header("X-User-Role", role)
-                    .build();
-
-            return chain.filter(exchange.mutate().request(modifiedRequest).build());
-        };
-    }
-
-    private Boolean checkPermissionFromSecurityService(CacheKey key) {
-        // Gọi service-security để kiểm tra quyền
-        try {
-            String encodedPath = UriUtils.encodePath(key.getPath(), StandardCharsets.UTF_8);
+            // Kiểm tra quyền từ security service reactive
+            String encodedPath = UriUtils.encodePath(requestPath, StandardCharsets.UTF_8);
 
             return webClientBuilder.build()
                     .get()
                     .uri("lb://service-security/api/auth/check-permission?role={role}&path={path}&method={method}",
-                            key.getRole(), encodedPath, key.getMethod())
+                            role, encodedPath, requestMethod)
                     .retrieve()
                     .bodyToMono(Boolean.class)
-                    .block();
-        } catch (Exception e) {
-            logger.error("Error calling security service: {}", e.getMessage());
-            return false;
-        }
+                    .defaultIfEmpty(false)
+                    .onErrorReturn(false)
+                    .flatMap(hasPermission -> {
+                        if (!hasPermission) {
+                            logger.warn("Access denied for user {} with role {} to path {} method {}",
+                                    userId, role, requestPath, requestMethod);
+                            return onError(exchange, "Access denied. Insufficient permissions.", HttpStatus.FORBIDDEN);
+                        }
+
+                        // Add user info to headers for downstream services
+                        ServerHttpRequest modifiedRequest = exchange.getRequest().mutate()
+                                .header("X-User-Id", userId)
+                                .header("X-User-Role", role)
+                                .build();
+
+                        return chain.filter(exchange.mutate().request(modifiedRequest).build());
+                    });
+        };
     }
+
 
     private boolean isOpenPath(String path) {
         return path.startsWith("/api/auth") ||
@@ -149,7 +124,6 @@ public class JwtAuthenticationFilter extends AbstractGatewayFilterFactory<JwtAut
 
     private String getRoleFromToken(String token) {
         Claims claims = jwtUtils.getClaimsFromJwtToken(token);
-        // Lấy role dưới dạng String thay vì roleId
         return claims.get("role", String.class);
     }
 
@@ -161,48 +135,6 @@ public class JwtAuthenticationFilter extends AbstractGatewayFilterFactory<JwtAut
     }
 
     public static class Config {
-        // Configuration properties if needed
-    }
-
-    // Class dùng làm key cho cache
-    private static class CacheKey {
-        private final String role; // Sử dụng role thay vì roleId
-        private final String path;
-        private final String method;
-
-        public CacheKey(String role, String path, String method) {
-            this.role = role;
-            this.path = path;
-            this.method = method;
-        }
-
-        public String getRole() {
-            return role;
-        }
-
-        public String getPath() {
-            return path;
-        }
-
-        public String getMethod() {
-            return method;
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            if (this == o)
-                return true;
-            if (o == null || getClass() != o.getClass())
-                return false;
-            CacheKey cacheKey = (CacheKey) o;
-            return Objects.equals(role, cacheKey.role) &&
-                    Objects.equals(path, cacheKey.path) &&
-                    Objects.equals(method, cacheKey.method);
-        }
-
-        @Override
-        public int hashCode() {
-            return Objects.hash(role, path, method);
-        }
+        
     }
 }

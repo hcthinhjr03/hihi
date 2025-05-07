@@ -6,7 +6,9 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 @Entity
@@ -32,4 +34,8 @@ public class Role {
     
     @Column(length = 100)
     private String description;
+
+    public List<Permission> getPermissionList() {
+        return new ArrayList<>(this.permissions);
+    }
 }

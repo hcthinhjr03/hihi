@@ -6,7 +6,7 @@ import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
 
 @SpringBootApplication
 @EnableDiscoveryClient
-class ServiceSecurityApplication {
+public class ServiceSecurityApplication {
     public static void main(String[] args) {
         SpringApplication.run(ServiceSecurityApplication.class, args);
     }
